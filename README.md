@@ -25,26 +25,78 @@ $ skillnk init
 A "skill" is any top-level directory in that repo (dotfiles and `.github`
 are ignored).
 
-### Importing other skills repos
+## The `skillnk` config file
 
-You can extend your library with other people's skills repos by adding a
-`skillnk.yaml` (or `.yml`, `.json`, `.toml`) file to the root of your own
-skills repo:
+Your skills repo may include a `skillnk` config file at its root, which
+currently configures one thing: **imports** — other git repos whose skills
+should be added to your library.
+
+### Location and format
+
+The file lives at the root of your skills repo and may be written in any of
+four formats. If multiple exist, this precedence applies (first match wins):
+
+1. `skillnk.yaml`
+2. `skillnk.yml`
+3. `skillnk.json`
+4. `skillnk.toml`
+
+### Schema
+
+One top-level key: `imports`, a list of objects.
+
+| field  | required | notes                                                             |
+|--------|----------|-------------------------------------------------------------------|
+| `url`  | yes      | Any git URL `git clone` understands.                              |
+| `name` | no       | Directory name under `~/.skillnk/` for the clone. See defaulting. |
+
+If `name` is omitted, skillnk strips the `github.com` prefix (handling the
+`https://`, `http://`, `ssh://git@`, `git@...:`, and bare forms) and any
+trailing `.git`, giving e.g. `owner/repo`. For non-GitHub URLs, the name
+defaults to the repo's basename (`repo` for `https://gitlab.example/team/repo.git`).
+
+Names must not contain `..`, start with `.` or `/`, or equal the reserved
+values `repo` or `config.yaml`. Duplicate names are rejected.
+
+### Examples
 
 ```yaml
+# skillnk.yaml
 imports:
   - name: team-skills
     url: git@github.com:acme/team-skills.git
   - url: https://github.com/charmbracelet/skills.git   # name defaults to "charmbracelet/skills"
 ```
 
-- Only `url` is required. `name` defaults to the URL with the `github.com`
-  prefix stripped; it's also the directory name under `~/.skillnk/` where
-  the imported repo is cloned.
-- Imports are cloned on first use, appear alongside your own skills in
-  `list`/`install`, and are pulled by `update` along with the primary repo.
-- Imports are **not transitive**: a `skillnk` config inside an imported
-  repo is ignored.
+```json
+{
+  "imports": [
+    { "name": "team-skills", "url": "git@github.com:acme/team-skills.git" },
+    { "url": "https://github.com/charmbracelet/skills.git" }
+  ]
+}
+```
+
+```toml
+# skillnk.toml
+[[imports]]
+name = "team-skills"
+url  = "git@github.com:acme/team-skills.git"
+
+[[imports]]
+url = "https://github.com/charmbracelet/skills.git"
+```
+
+### Behavior
+
+- Imports are cloned into `~/.skillnk/<name>` on first use (during `install`,
+  `list`, or `update`).
+- Their top-level directories appear alongside your own skills in `list` and
+  the `install` picker, tagged with the source repo name.
+- `skillnk update` runs `git pull --ff-only` on the primary checkout and
+  every import.
+- Imports are **not transitive**: a `skillnk` config inside an imported repo
+  is ignored.
 - If the same skill name appears in more than one source, the primary repo
   wins, then imports in declaration order.
 
