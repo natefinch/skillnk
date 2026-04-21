@@ -77,7 +77,7 @@ func (l Library) EnsureCloned(ctx context.Context) error {
 		if s.Repo.Exists() {
 			continue
 		}
-		if err := s.Repo.Clone(ctx, s.URL.Original); err != nil {
+		if err := s.Repo.Clone(ctx, s.URL.CloneURL()); err != nil {
 			return fmt.Errorf("clone %s: %w", s.URL.DisplayPath(), err)
 		}
 		if s.Version != "" {

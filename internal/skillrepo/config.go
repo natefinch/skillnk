@@ -230,6 +230,25 @@ func hasScheme(s, scheme string) bool {
 	return len(s) >= len(scheme) && strings.EqualFold(s[:len(scheme)], scheme)
 }
 
+// CloneURL returns a URL suitable for `git clone`. If the user wrote a
+// bare "host/path" form (no scheme, no scp-style colon), we synthesize
+// "https://host/path" so git can resolve it; otherwise the original URL
+// is passed through unchanged so the user's chosen protocol, auth, and
+// credentials keep working.
+func (g GitURL) CloneURL() string {
+	s := strings.TrimSpace(g.Original)
+	if strings.Contains(s, "://") {
+		return g.Original
+	}
+	firstColon := strings.Index(s, ":")
+	firstSlash := strings.Index(s, "/")
+	if firstColon >= 0 && (firstSlash < 0 || firstColon < firstSlash) {
+		// scp-style; pass through.
+		return g.Original
+	}
+	return "https://" + g.Host + "/" + g.Path + ".git"
+}
+
 // CloneDirSegments returns the path segments that identify this repo on
 // disk under ~/.skillnk and under a client's skills directory: the host
 // followed by each path segment.

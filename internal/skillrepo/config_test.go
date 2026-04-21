@@ -185,6 +185,25 @@ func TestParseGitURL(t *testing.T) {
 	}
 }
 
+func TestGitURLCloneURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"github.com/anthropics/skills", "https://github.com/anthropics/skills.git"},
+		{"example.com/foo/bar", "https://example.com/foo/bar.git"},
+		{"https://github.com/x/y.git", "https://github.com/x/y.git"},
+		{"git@github.com:x/y.git", "git@github.com:x/y.git"},
+		{"ssh://git@example.com/x/y", "ssh://git@example.com/x/y"},
+	}
+	for _, c := range cases {
+		g, err := ParseGitURL(c.in)
+		if err != nil {
+			t.Fatalf("ParseGitURL(%q): %v", c.in, err)
+		}
+		if got := g.CloneURL(); got != c.want {
+			t.Errorf("CloneURL(%q) = %q want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestGitURLSegments(t *testing.T) {
 	g, _ := ParseGitURL("git@example.com:my-org/my-repo.git")
 	segs := g.CloneDirSegments()
