@@ -13,31 +13,65 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Import is one external skills repo declared in a skillnk config file.
+// Import is one external skills source declared in a skillnk config file.
+// Each Import identifies a git repo (via URL) and optionally narrows the
+// set of skills to pick up via Dir.
+//
+// Dir accepts these forms:
+//
+//   - "" or "*": every top-level directory of the repo is a skill (default)
+//   - "some/dir": a single skill directory at that path, with optional
+//     trailing "/"
+//   - "some/dir/*": every immediate subdirectory of "some/dir" is a skill
+//
+// Version optionally pins the clone to a specific git ref.
 type Import struct {
-	Name string `yaml:"name" json:"name" toml:"name"`
-	URL  string `yaml:"url"  json:"url"  toml:"url"`
-	// Version is an optional git ref (tag, branch, or commit SHA) to pin
-	// the import to. If empty, the import tracks the remote default branch
-	// and is updated via git pull --ff-only. When set, skillnk checks out
-	// this ref after cloning and re-checks it out (after git fetch) on
-	// every update.
+	URL     string `yaml:"url"     json:"url"     toml:"url"`
+	Dir     string `yaml:"dir"     json:"dir"     toml:"dir"`
 	Version string `yaml:"version" json:"version" toml:"version"`
 }
 
-// SkillRef references one individual skill inside a git repo, typically at
-// a subdirectory of that repo. Only github.com URLs are currently
-// supported. Path segments after "<owner>/<repo>" are treated as the
-// subpath of the skill inside the repo.
-type SkillRef struct {
-	URL     string `yaml:"url"     json:"url"     toml:"url"`
-	Name    string `yaml:"name"    json:"name"    toml:"name"`
-	Version string `yaml:"version" json:"version" toml:"version"`
+// DirSelector is the parsed form of Import.Dir.
+//
+//	Prefix       Wildcard  meaning
+//	""           true      all top-level dirs of the repo are skills
+//	"some/dir"   false     one skill: <repo>/some/dir
+//	"some/dir"   true      every subdir of <repo>/some/dir is a skill
+type DirSelector struct {
+	Prefix   string
+	Wildcard bool
+}
+
+// ParseDir normalizes the raw dir string from an Import.
+func ParseDir(raw string) (DirSelector, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "*" || s == "/" {
+		return DirSelector{Wildcard: true}, nil
+	}
+	// strip leading slash (we don't allow absolute, but be forgiving)
+	s = strings.TrimLeft(s, "/")
+	wildcard := false
+	if strings.HasSuffix(s, "/*") {
+		wildcard = true
+		s = strings.TrimSuffix(s, "/*")
+	} else if strings.HasSuffix(s, "/") {
+		s = strings.TrimSuffix(s, "/")
+	}
+	if s == "" {
+		return DirSelector{Wildcard: true}, nil
+	}
+	if strings.Contains(s, "*") {
+		return DirSelector{}, fmt.Errorf("dir %q: '*' may only appear as the final path segment", raw)
+	}
+	clean := path.Clean(s)
+	if clean != s || strings.HasPrefix(clean, "..") || clean == "." {
+		return DirSelector{}, fmt.Errorf("dir %q is not a clean relative path", raw)
+	}
+	return DirSelector{Prefix: clean, Wildcard: wildcard}, nil
 }
 
 type repoConfigFile struct {
-	Imports []Import   `yaml:"imports" json:"imports" toml:"imports"`
-	Skills  []SkillRef `yaml:"skills"  json:"skills"  toml:"skills"`
+	Imports []Import `yaml:"imports" json:"imports" toml:"imports"`
 }
 
 // configFileNames is the ordered list of accepted skillnk config filenames in
@@ -49,17 +83,12 @@ var configFileNames = []string{
 	"skillnk.toml",
 }
 
-// reservedImportNames are names an import may not take because they would
-// collide with skillnk's own files in ~/.skillnk.
-var reservedImportNames = map[string]struct{}{
-	"repo":        {},
-	"config.yaml": {},
-}
-
-// readConfigRaw loads the first matching config file and decodes it into
-// repoConfigFile. Returns ("", nil) if no file is present.
-func readConfigRaw(repoDir string) (repoConfigFile, string, error) {
+// ReadImports reads the skillnk config from the root of repoDir and returns
+// the normalized list of imports. Returns (nil, nil) if no config file is
+// present.
+func ReadImports(repoDir string) ([]Import, error) {
 	var cfg repoConfigFile
+	var found string
 	for _, name := range configFileNames {
 		p := filepath.Join(repoDir, name)
 		b, err := os.ReadFile(p)
@@ -67,235 +96,155 @@ func readConfigRaw(repoDir string) (repoConfigFile, string, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return cfg, "", fmt.Errorf("skillrepo: read %s: %w", p, err)
+			return nil, fmt.Errorf("skillrepo: read %s: %w", p, err)
 		}
 		switch filepath.Ext(name) {
 		case ".yaml", ".yml":
 			if err := yaml.Unmarshal(b, &cfg); err != nil {
-				return cfg, p, fmt.Errorf("skillrepo: parse %s: %w", p, err)
+				return nil, fmt.Errorf("skillrepo: parse %s: %w", p, err)
 			}
 		case ".json":
 			if err := json.Unmarshal(b, &cfg); err != nil {
-				return cfg, p, fmt.Errorf("skillrepo: parse %s: %w", p, err)
+				return nil, fmt.Errorf("skillrepo: parse %s: %w", p, err)
 			}
 		case ".toml":
 			if err := toml.Unmarshal(b, &cfg); err != nil {
-				return cfg, p, fmt.Errorf("skillrepo: parse %s: %w", p, err)
+				return nil, fmt.Errorf("skillrepo: parse %s: %w", p, err)
 			}
 		}
-		return cfg, p, nil
-	}
-	return cfg, "", nil
-}
-
-// ReadImports reads the skillnk config from the root of repoDir and returns
-// the normalized import list. If no config file is present, it returns (nil,
-// nil). Imports with a missing Name are defaulted from their URL.
-func ReadImports(repoDir string) ([]Import, error) {
-	cfg, found, err := readConfigRaw(repoDir)
-	if err != nil {
-		return nil, err
+		found = p
+		break
 	}
 	if found == "" {
 		return nil, nil
 	}
-	seen := map[string]struct{}{}
 	out := make([]Import, 0, len(cfg.Imports))
 	for i, imp := range cfg.Imports {
 		if strings.TrimSpace(imp.URL) == "" {
 			return nil, fmt.Errorf("skillrepo: %s: imports[%d]: url is required", found, i)
 		}
-		if imp.Name == "" {
-			imp.Name = DefaultImportName(imp.URL)
-		}
-		if err := validateImportName(imp.Name); err != nil {
+		if _, err := ParseGitURL(imp.URL); err != nil {
 			return nil, fmt.Errorf("skillrepo: %s: imports[%d]: %w", found, i, err)
 		}
-		if _, dup := seen[imp.Name]; dup {
-			return nil, fmt.Errorf("skillrepo: %s: imports[%d]: duplicate name %q", found, i, imp.Name)
+		if _, err := ParseDir(imp.Dir); err != nil {
+			return nil, fmt.Errorf("skillrepo: %s: imports[%d]: %w", found, i, err)
 		}
-		seen[imp.Name] = struct{}{}
 		out = append(out, imp)
 	}
 	return out, nil
 }
 
-// ReadSkillRefs reads the skillnk config and returns the normalized list of
-// individual skill references. Each entry's URL is required and must be a
-// supported github.com URL. Returns (nil, nil) if no config file exists.
-func ReadSkillRefs(repoDir string) ([]SkillRef, error) {
-	cfg, found, err := readConfigRaw(repoDir)
-	if err != nil {
-		return nil, err
-	}
-	if found == "" {
-		return nil, nil
-	}
-	seen := map[string]struct{}{}
-	out := make([]SkillRef, 0, len(cfg.Skills))
-	for i, sr := range cfg.Skills {
-		if strings.TrimSpace(sr.URL) == "" {
-			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: url is required", found, i)
-		}
-		g, ok := ParseGitHubURL(sr.URL)
-		if !ok {
-			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: unsupported URL %q (only github.com URLs are supported)", found, i, sr.URL)
-		}
-		if sr.Name == "" {
-			sr.Name = g.DefaultSkillName()
-		}
-		if err := validateImportName(sr.Name); err != nil {
-			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: %w", found, i, err)
-		}
-		if _, dup := seen[sr.Name]; dup {
-			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: duplicate name %q", found, i, sr.Name)
-		}
-		seen[sr.Name] = struct{}{}
-		out = append(out, sr)
-	}
-	return out, nil
+// GitURL is a parsed git clone URL, split into the components skillnk uses
+// to decide where to clone the repo and lay out skills on disk.
+type GitURL struct {
+	// Host is the server hostname ("github.com", "example.com", ...).
+	Host string
+	// Path is the repo path on the server with leading/trailing "/" and a
+	// trailing ".git" stripped. E.g. "my-org/my-repo".
+	Path string
+	// Original is the URL as the user wrote it; this is what skillnk
+	// passes to `git clone` so the user's chosen protocol and credentials
+	// keep working.
+	Original string
 }
 
-// GitHubURL is a parsed GitHub-style URL, split into its repo coordinates
-// and any subpath after <owner>/<repo>.
-type GitHubURL struct {
-	Owner   string
-	Repo    string // without trailing ".git"
-	Subpath string // "" if the URL refers to the repo root
-}
-
-// ParseGitHubURL parses a github-style URL into its components. It accepts
-// the common forms:
+// ParseGitURL accepts any of the common git URL forms and extracts Host +
+// Path. Supported shapes:
 //
-//	github.com/OWNER/REPO[/SUB/PATH]
-//	github.com:OWNER/REPO[/SUB/PATH]
-//	https://github.com/OWNER/REPO[/SUB/PATH]
-//	http://github.com/OWNER/REPO[/SUB/PATH]
-//	ssh://git@github.com/OWNER/REPO[/SUB/PATH]
-//	git@github.com:OWNER/REPO[/SUB/PATH]
+//   - https://HOST/PATH
+//   - http://HOST/PATH
+//   - ssh://[USER@]HOST[:PORT]/PATH
+//   - git://HOST/PATH
+//   - [USER@]HOST:PATH            (scp-like)
+//   - HOST/PATH                   (bare, implicit scheme)
 //
-// A trailing ".git" on REPO is tolerated and stripped. Returns (_, false)
-// if the input is not a recognizable github.com URL.
-func ParseGitHubURL(raw string) (GitHubURL, bool) {
+// A trailing ".git" on PATH is stripped. Trailing slashes are trimmed.
+func ParseGitURL(raw string) (GitURL, error) {
 	s := strings.TrimSpace(raw)
-	s = strings.TrimSuffix(s, "/")
-	prefixes := []string{
-		"https://github.com/",
-		"http://github.com/",
-		"ssh://git@github.com/",
-		"git@github.com:",
-		"github.com/",
-		"github.com:",
+	if s == "" {
+		return GitURL{}, errors.New("empty git URL")
 	}
-	matched := false
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			s = strings.TrimPrefix(s, p)
-			matched = true
-			break
+	orig := s
+
+	var host, rest string
+	switch {
+	case hasScheme(s, "https://"), hasScheme(s, "http://"),
+		hasScheme(s, "ssh://"), hasScheme(s, "git://"),
+		hasScheme(s, "git+ssh://"):
+		i := strings.Index(s, "://")
+		afterScheme := s[i+3:]
+		// Strip optional user@ before host.
+		if slash := strings.Index(afterScheme, "/"); slash >= 0 {
+			hostpart := afterScheme[:slash]
+			rest = afterScheme[slash+1:]
+			if at := strings.LastIndex(hostpart, "@"); at >= 0 {
+				hostpart = hostpart[at+1:]
+			}
+			if colon := strings.Index(hostpart, ":"); colon >= 0 {
+				hostpart = hostpart[:colon]
+			}
+			host = hostpart
+		} else {
+			return GitURL{}, fmt.Errorf("git URL %q has no path", raw)
+		}
+	case strings.Contains(s, "://"):
+		return GitURL{}, fmt.Errorf("git URL %q uses unsupported scheme", raw)
+	default:
+		// scp-like or bare. scp form: [user@]host:path where ':' precedes any '/'.
+		firstColon := strings.Index(s, ":")
+		firstSlash := strings.Index(s, "/")
+		if firstColon >= 0 && (firstSlash < 0 || firstColon < firstSlash) {
+			hostpart := s[:firstColon]
+			rest = s[firstColon+1:]
+			if at := strings.LastIndex(hostpart, "@"); at >= 0 {
+				hostpart = hostpart[at+1:]
+			}
+			host = hostpart
+		} else {
+			if firstSlash < 0 {
+				return GitURL{}, fmt.Errorf("git URL %q has no path", raw)
+			}
+			host = s[:firstSlash]
+			rest = s[firstSlash+1:]
 		}
 	}
-	if !matched {
-		return GitHubURL{}, false
+
+	host = strings.TrimSpace(host)
+	rest = strings.Trim(rest, "/")
+	rest = strings.TrimSuffix(rest, ".git")
+	rest = strings.TrimRight(rest, "/")
+
+	if host == "" {
+		return GitURL{}, fmt.Errorf("git URL %q has no host", raw)
 	}
-	parts := strings.Split(s, "/")
-	if len(parts) < 2 {
-		return GitHubURL{}, false
+	if rest == "" {
+		return GitURL{}, fmt.Errorf("git URL %q has no path", raw)
 	}
-	owner := parts[0]
-	repo := strings.TrimSuffix(parts[1], ".git")
-	if owner == "" || repo == "" {
-		return GitHubURL{}, false
+	if strings.Contains(rest, "..") {
+		return GitURL{}, fmt.Errorf("git URL %q has invalid path", raw)
 	}
-	var sub string
-	if len(parts) > 2 {
-		rest := strings.Join(parts[2:], "/")
-		sub = path.Clean(rest)
-		// Reject anything that would escape the repo root.
-		if sub == "." || sub == "/" || strings.HasPrefix(sub, "../") || sub == ".." {
-			sub = ""
+	return GitURL{Host: host, Path: rest, Original: orig}, nil
+}
+
+func hasScheme(s, scheme string) bool {
+	return len(s) >= len(scheme) && strings.EqualFold(s[:len(scheme)], scheme)
+}
+
+// CloneDirSegments returns the path segments that identify this repo on
+// disk under ~/.skillnk and under a client's skills directory: the host
+// followed by each path segment.
+func (g GitURL) CloneDirSegments() []string {
+	segs := []string{g.Host}
+	for _, p := range strings.Split(g.Path, "/") {
+		if p != "" {
+			segs = append(segs, p)
 		}
 	}
-	return GitHubURL{Owner: owner, Repo: repo, Subpath: sub}, true
+	return segs
 }
 
-// CloneURL returns a canonical https clone URL (always ending in .git) for
-// the repo.
-func (g GitHubURL) CloneURL() string {
-	return "https://github.com/" + g.Owner + "/" + g.Repo + ".git"
-}
-
-// RepoName returns "owner/repo" — the canonical two-segment repo path.
-func (g GitHubURL) RepoName() string {
-	return g.Owner + "/" + g.Repo
-}
-
-// DisplayPath returns the URL's canonical short form, including any
-// subpath: e.g. "anthropics/skills/skills/skill-creator".
-func (g GitHubURL) DisplayPath() string {
-	if g.Subpath == "" {
-		return g.RepoName()
-	}
-	return g.RepoName() + "/" + g.Subpath
-}
-
-// DefaultSkillName returns the default skill name for this URL: the last
-// segment of the subpath, or the repo name if no subpath is present.
-func (g GitHubURL) DefaultSkillName() string {
-	if g.Subpath != "" {
-		return path.Base(g.Subpath)
-	}
-	return g.Repo
-}
-
-// DefaultImportName derives an import name from a git URL. It strips common
-// github.com prefixes and any trailing ".git". If no github.com prefix is
-// present, it falls back to the URL's final path segment.
-func DefaultImportName(url string) string {
-	s := strings.TrimSpace(url)
-	stripped := false
-	for _, p := range []string{
-		"https://github.com/",
-		"http://github.com/",
-		"ssh://git@github.com/",
-		"git@github.com:",
-		"github.com/",
-		"github.com:",
-	} {
-		if strings.HasPrefix(s, p) {
-			s = strings.TrimPrefix(s, p)
-			stripped = true
-			break
-		}
-	}
-	s = strings.TrimSuffix(s, ".git")
-	s = strings.Trim(s, "/")
-	if !stripped {
-		s = path.Base(s)
-		s = strings.TrimSuffix(s, ".git")
-	}
-	if s == "" || s == "." || s == "/" {
-		return "import"
-	}
-	return s
-}
-
-func validateImportName(name string) error {
-	if name == "" {
-		return errors.New("name is empty")
-	}
-	if strings.HasPrefix(name, ".") {
-		return fmt.Errorf("name %q must not start with '.'", name)
-	}
-	if strings.ContainsAny(name, `\`+"\x00") || strings.Contains(name, "..") {
-		return fmt.Errorf("name %q contains invalid characters", name)
-	}
-	// slashes are allowed (e.g. "owner/repo") but reject absolute / parent refs
-	if strings.HasPrefix(name, "/") {
-		return fmt.Errorf("name %q must not be absolute", name)
-	}
-	if _, bad := reservedImportNames[name]; bad {
-		return fmt.Errorf("name %q is reserved", name)
-	}
-	return nil
+// DisplayPath returns "host/path" — a compact identifier used in messages
+// and as the Source label on listed skills.
+func (g GitURL) DisplayPath() string {
+	return g.Host + "/" + g.Path
 }

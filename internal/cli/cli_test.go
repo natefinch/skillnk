@@ -297,18 +297,13 @@ func TestInstallFromImport(t *testing.T) {
 	app, home, proj, _, _, _ := setup(t)
 	seedConfig(t, home)
 	checkout := seedSkills(t, home, "alpha")
-	// Primary config declares an import.
 	if err := os.WriteFile(filepath.Join(checkout, "skillnk.yaml"),
-		[]byte("imports:\n  - name: team\n    url: git@example:team/skills.git\n"),
+		[]byte("imports:\n  - url: git@example.com:team/skills.git\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Our fake git clone just creates .git — we need to pre-populate the
-	// import dir so that after the clone, "beta" is present. The fakeGit in
-	// this test file ignores seedAfter, so we create the import manually
-	// before the CLI runs; then EnsureImportsCloned sees it exists and
-	// skips cloning.
-	importDir := filepath.Join(home, ".skillnk", "team")
+	// Pre-populate the import clone so EnsureCloned skips it.
+	importDir := filepath.Join(home, ".skillnk", "example.com", "team", "skills")
 	if err := os.MkdirAll(filepath.Join(importDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -319,13 +314,13 @@ func TestInstallFromImport(t *testing.T) {
 	if err := run(t, app, "install", "--client=claude", "--skill=beta"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	link := filepath.Join(proj, ".claude", "skills", "beta")
+	link := filepath.Join(proj, ".claude", "skills", "example.com", "team", "skills", "beta")
 	dest, err := os.Readlink(link)
 	if err != nil {
-		t.Fatalf("readlink: %v", err)
+		t.Fatalf("readlink %s: %v", link, err)
 	}
 	if dest != filepath.Join(importDir, "beta") {
-		t.Errorf("symlink points to %q, want import path", dest)
+		t.Errorf("symlink points to %q, want %q", dest, filepath.Join(importDir, "beta"))
 	}
 }
 
@@ -334,17 +329,15 @@ func TestInstallClonesImportOnDemand(t *testing.T) {
 	seedConfig(t, home)
 	checkout := seedSkills(t, home, "alpha")
 	if err := os.WriteFile(filepath.Join(checkout, "skillnk.yaml"),
-		[]byte("imports:\n  - name: team\n    url: git@example:team/skills.git\n"),
+		[]byte("imports:\n  - url: git@example.com:team/skills.git\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
-	// fakeGit's clone creates .git; no skills inside. Installing "alpha"
-	// (primary) must still work, and the import should have been cloned so
-	// its dir exists on disk.
 	if err := run(t, app, "install", "--client=claude", "--skill=alpha"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".skillnk", "team", ".git")); err != nil {
+	cloneDir := filepath.Join(home, ".skillnk", "example.com", "team", "skills", ".git")
+	if _, err := os.Stat(cloneDir); err != nil {
 		t.Errorf("import should have been cloned: %v", err)
 	}
 }
@@ -354,12 +347,12 @@ func TestUpdatePullsImports(t *testing.T) {
 	seedConfig(t, home)
 	checkout := seedSkills(t, home, "alpha")
 	if err := os.WriteFile(filepath.Join(checkout, "skillnk.yaml"),
-		[]byte("imports:\n  - name: team\n    url: x\n"),
+		[]byte("imports:\n  - url: github.com/acme/team\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-create the import so it's treated as existing.
-	if err := os.MkdirAll(filepath.Join(home, ".skillnk", "team", ".git"), 0o755); err != nil {
+	importDir := filepath.Join(home, ".skillnk", "github.com", "acme", "team")
+	if err := os.MkdirAll(filepath.Join(importDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	g.pullDirs = nil
@@ -376,11 +369,11 @@ func TestListIncludesImportedSkills(t *testing.T) {
 	seedConfig(t, home)
 	checkout := seedSkills(t, home, "alpha")
 	if err := os.WriteFile(filepath.Join(checkout, "skillnk.yaml"),
-		[]byte("imports:\n  - name: team\n    url: x\n"),
+		[]byte("imports:\n  - url: github.com/acme/team\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}
-	importDir := filepath.Join(home, ".skillnk", "team")
+	importDir := filepath.Join(home, ".skillnk", "github.com", "acme", "team")
 	if err := os.MkdirAll(filepath.Join(importDir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +387,7 @@ func TestListIncludesImportedSkills(t *testing.T) {
 	if !strings.Contains(txt, "alpha") || !strings.Contains(txt, "beta") {
 		t.Errorf("missing skills in list: %q", txt)
 	}
-	if !strings.Contains(txt, "from team") {
+	if !strings.Contains(txt, "github.com/acme/team") {
 		t.Errorf("missing import source marker: %q", txt)
 	}
 }

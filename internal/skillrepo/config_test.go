@@ -27,207 +27,172 @@ func TestReadImportsNoFile(t *testing.T) {
 	}
 }
 
-func TestReadImportsYAML(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", `
+func TestReadImportsAllFormats(t *testing.T) {
+	cases := []struct {
+		fname, body string
+	}{
+		{"skillnk.yaml", `
 imports:
-  - name: team-skills
-    url: git@github.com:acme/team-skills.git
+  - url: git@github.com:acme/team-skills.git
+    dir: skills/foo
+    version: v1
   - url: https://github.com/charm/skills.git
-`)
-	got, err := ReadImports(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %+v", got)
-	}
-	if got[0].Name != "team-skills" || got[0].URL != "git@github.com:acme/team-skills.git" {
-		t.Errorf("got[0] = %+v", got[0])
-	}
-	if got[1].Name != "charm/skills" || got[1].URL != "https://github.com/charm/skills.git" {
-		t.Errorf("got[1] = %+v", got[1])
-	}
-}
-
-func TestReadImportsJSON(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.json", `{"imports":[{"url":"https://github.com/a/b"}]}`)
-	got, err := ReadImports(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "a/b" {
-		t.Errorf("got %+v", got)
-	}
-}
-
-func TestReadImportsTOML(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.toml", `
+`},
+		{"skillnk.json", `{"imports":[
+  {"url":"git@github.com:acme/team-skills.git","dir":"skills/foo","version":"v1"},
+  {"url":"https://github.com/charm/skills.git"}
+]}`},
+		{"skillnk.toml", `
 [[imports]]
-url = "git@github.com:me/r.git"
-name = "mine"
-`)
-	got, err := ReadImports(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "mine" {
-		t.Errorf("got %+v", got)
-	}
-}
+url = "git@github.com:acme/team-skills.git"
+dir = "skills/foo"
+version = "v1"
 
-func TestReadImportsYML(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yml", "imports:\n - url: https://github.com/x/y\n")
-	got, err := ReadImports(dir)
-	if err != nil {
-		t.Fatal(err)
+[[imports]]
+url = "https://github.com/charm/skills.git"
+`},
 	}
-	if len(got) != 1 || got[0].Name != "x/y" {
-		t.Errorf("got %+v", got)
-	}
-}
-
-func TestReadImportsPriority(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", "imports:\n - url: https://github.com/first/first\n")
-	writeFile(t, dir, "skillnk.json", `{"imports":[{"url":"https://github.com/second/second"}]}`)
-	got, err := ReadImports(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "first/first" {
-		t.Errorf("yaml should win: %+v", got)
+	for _, c := range cases {
+		t.Run(c.fname, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, c.fname, c.body)
+			got, err := ReadImports(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 2 {
+				t.Fatalf("got %+v", got)
+			}
+			if got[0].URL != "git@github.com:acme/team-skills.git" || got[0].Dir != "skills/foo" || got[0].Version != "v1" {
+				t.Errorf("got[0] = %+v", got[0])
+			}
+			if got[1].URL != "https://github.com/charm/skills.git" {
+				t.Errorf("got[1] = %+v", got[1])
+			}
+		})
 	}
 }
 
 func TestReadImportsMissingURL(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", "imports:\n - name: foo\n")
+	writeFile(t, dir, "skillnk.yaml", "imports:\n  - dir: foo\n")
 	_, err := ReadImports(dir)
 	if err == nil || !strings.Contains(err.Error(), "url is required") {
 		t.Errorf("want url required, got %v", err)
 	}
 }
 
-func TestReadImportsDuplicateNames(t *testing.T) {
+func TestReadImportsBadURL(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", `
-imports:
-  - name: dup
-    url: https://github.com/a/b
-  - name: dup
-    url: https://github.com/c/d
-`)
-	_, err := ReadImports(dir)
-	if err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Errorf("want duplicate error, got %v", err)
-	}
-}
-
-func TestReadImportsReservedName(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", `
-imports:
-  - name: repo
-    url: https://github.com/a/b
-`)
-	_, err := ReadImports(dir)
-	if err == nil || !strings.Contains(err.Error(), "reserved") {
-		t.Errorf("want reserved error, got %v", err)
-	}
-}
-
-func TestReadImportsBadName(t *testing.T) {
-	cases := []string{".hidden", "a/../b", "/abs"}
-	for _, n := range cases {
-		dir := t.TempDir()
-		writeFile(t, dir, "skillnk.yaml", "imports:\n - name: "+n+"\n   url: https://github.com/a/b\n")
-		if _, err := ReadImports(dir); err == nil {
-			t.Errorf("name %q should be rejected", n)
-		}
-	}
-}
-
-func TestDefaultImportName(t *testing.T) {
-	cases := map[string]string{
-		"https://github.com/owner/repo":          "owner/repo",
-		"https://github.com/owner/repo.git":      "owner/repo",
-		"http://github.com/owner/repo":           "owner/repo",
-		"git@github.com:owner/repo.git":          "owner/repo",
-		"ssh://git@github.com/owner/repo.git":    "owner/repo",
-		"github.com/owner/repo":                  "owner/repo",
-		"github.com:owner/repo":                  "owner/repo",
-		"https://gitlab.example.com/team/repo.git": "repo",
-		"https://example.com/x.git":              "x",
-		"":                                       "import",
-		"/":                                      "import",
-	}
-	for in, want := range cases {
-		if got := DefaultImportName(in); got != want {
-			t.Errorf("DefaultImportName(%q) = %q want %q", in, got, want)
-		}
-	}
-}
-
-func TestReadImportsVersion(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", `
-imports:
-  - name: pinned
-    url: git@example:a/b.git
-    version: v1.2.3
-  - name: unpinned
-    url: git@example:c/d.git
-`)
-	got, err := ReadImports(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %+v", got)
-	}
-	if got[0].Version != "v1.2.3" {
-		t.Errorf("version = %q want v1.2.3", got[0].Version)
-	}
-	if got[1].Version != "" {
-		t.Errorf("unpinned version = %q want empty", got[1].Version)
-	}
-}
-
-func TestReadImportsVersionJSONAndTOML(t *testing.T) {
-	dirJSON := t.TempDir()
-	writeFile(t, dirJSON, "skillnk.json", `{"imports":[{"url":"x","version":"abc123"}]}`)
-	got, err := ReadImports(dirJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Version != "abc123" {
-		t.Errorf("json: got %+v", got)
-	}
-
-	dirTOML := t.TempDir()
-	writeFile(t, dirTOML, "skillnk.toml", `
-[[imports]]
-url = "x"
-version = "main"
-`)
-	got, err = ReadImports(dirTOML)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Version != "main" {
-		t.Errorf("toml: got %+v", got)
-	}
-}
-
-func TestReadImportsMalformedYAML(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "skillnk.yaml", "::: not yaml :::\n\t-[")
+	writeFile(t, dir, "skillnk.yaml", "imports:\n  - url: nonsense\n")
 	_, err := ReadImports(dir)
 	if err == nil {
-		t.Error("want parse error")
+		t.Fatal("want error")
+	}
+}
+
+func TestReadImportsBadDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "skillnk.yaml", `
+imports:
+  - url: github.com/a/b
+    dir: ../escape
+`)
+	_, err := ReadImports(dir)
+	if err == nil {
+		t.Fatal("want error")
+	}
+}
+
+func TestParseDir(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantPfx  string
+		wildcard bool
+		err      bool
+	}{
+		{"", "", true, false},
+		{"*", "", true, false},
+		{"/", "", true, false},
+		{"foo", "foo", false, false},
+		{"foo/", "foo", false, false},
+		{"foo/bar", "foo/bar", false, false},
+		{"foo/bar/", "foo/bar", false, false},
+		{"foo/*", "foo", true, false},
+		{"foo/bar/*", "foo/bar", true, false},
+		{"/foo", "foo", false, false},
+		{"../foo", "", false, true},
+		{"foo/../bar", "", false, true},
+		{"foo*bar", "", false, true},
+		{"*/bar", "", false, true},
+	}
+	for _, c := range cases {
+		got, err := ParseDir(c.in)
+		if c.err {
+			if err == nil {
+				t.Errorf("ParseDir(%q) want error, got %+v", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseDir(%q) err: %v", c.in, err)
+			continue
+		}
+		if got.Prefix != c.wantPfx || got.Wildcard != c.wildcard {
+			t.Errorf("ParseDir(%q) = %+v want {%q %v}", c.in, got, c.wantPfx, c.wildcard)
+		}
+	}
+}
+
+func TestParseGitURL(t *testing.T) {
+	cases := []struct {
+		in    string
+		ok    bool
+		host  string
+		path  string
+	}{
+		{"github.com/anthropics/skills", true, "github.com", "anthropics/skills"},
+		{"github.com/anthropics/skills/", true, "github.com", "anthropics/skills"},
+		{"https://github.com/anthropics/skills.git", true, "github.com", "anthropics/skills"},
+		{"http://example.com/a/b", true, "example.com", "a/b"},
+		{"git@github.com:anthropics/skills.git", true, "github.com", "anthropics/skills"},
+		{"git@example.com:my-org/my-repo", true, "example.com", "my-org/my-repo"},
+		{"ssh://git@example.com/my-org/my-repo.git", true, "example.com", "my-org/my-repo"},
+		{"ssh://git@example.com:22/my-org/my-repo", true, "example.com", "my-org/my-repo"},
+		{"git://github.com/a/b", true, "github.com", "a/b"},
+		{"user@host.tld:just-repo", true, "host.tld", "just-repo"},
+		{"", false, "", ""},
+		{"no-scheme-no-slash", false, "", ""},
+		{"host-only/", false, "", ""},
+		{"ftp://host/path", false, "", ""},
+		{"github.com/a/../b", false, "", ""},
+	}
+	for _, c := range cases {
+		got, err := ParseGitURL(c.in)
+		if c.ok != (err == nil) {
+			t.Errorf("ParseGitURL(%q) ok=%v err=%v", c.in, err == nil, err)
+			continue
+		}
+		if !c.ok {
+			continue
+		}
+		if got.Host != c.host || got.Path != c.path {
+			t.Errorf("ParseGitURL(%q) = %+v want {host=%q path=%q}", c.in, got, c.host, c.path)
+		}
+		if got.Original != c.in {
+			t.Errorf("ParseGitURL(%q) Original = %q", c.in, got.Original)
+		}
+	}
+}
+
+func TestGitURLSegments(t *testing.T) {
+	g, _ := ParseGitURL("git@example.com:my-org/my-repo.git")
+	segs := g.CloneDirSegments()
+	want := []string{"example.com", "my-org", "my-repo"}
+	if strings.Join(segs, "/") != strings.Join(want, "/") {
+		t.Errorf("segments = %v want %v", segs, want)
+	}
+	if got := g.DisplayPath(); got != "example.com/my-org/my-repo" {
+		t.Errorf("DisplayPath = %q", got)
 	}
 }

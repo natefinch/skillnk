@@ -14,6 +14,7 @@ import (
 // Status describes the state of an installed skill.
 type Status struct {
 	Name       string // skill name (basename of Target)
+	RelPath    string // path of Target relative to the skills root that was scanned
 	Target     string // absolute path of the symlink in the project
 	LinkDest   string // what the symlink points to (readlink), or "" if not a symlink
 	IsSymlink  bool   // true if Target is a symlink
@@ -129,32 +130,50 @@ func StatOne(target string) (Status, error) {
 	return s, nil
 }
 
-// ListInstalled returns the Status of every entry in dir that is a symlink.
-// Non-symlink entries are skipped. If dir does not exist, the result is
+// ListInstalled returns the Status of every symlink anywhere under dir,
+// walking recursively. Non-symlink entries are skipped, but directories
+// under them are still descended. If dir does not exist, the result is
 // empty with no error.
 func ListInstalled(dir string) ([]Status, error) {
-	entries, err := os.ReadDir(dir)
+	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("installer: read %s: %w", dir, err)
+		return nil, fmt.Errorf("installer: lstat %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return nil, nil
 	}
 	var out []Status
-	for _, e := range entries {
-		info, err := e.Info()
+	err = filepath.WalkDir(dir, func(p string, d os.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if p == dir {
+			return nil
+		}
+		i, err := d.Info()
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			continue
+		if i.Mode()&os.ModeSymlink != 0 {
+			s, err := StatOne(p)
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(dir, p)
+			if err == nil {
+				s.RelPath = rel
+			}
+			out = append(out, s)
+			return nil
 		}
-		s, err := StatOne(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, s)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("installer: walk %s: %w", dir, err)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool { return out[i].RelPath < out[j].RelPath })
 	return out, nil
 }

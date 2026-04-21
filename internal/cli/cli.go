@@ -232,7 +232,7 @@ func (a *App) cmdInstall() *cobra.Command {
 				return err
 			}
 			for _, s := range chosen {
-				target := cli.TargetFor(projectRoot, s.Name)
+				target := cli.TargetFor(projectRoot, s.InstallSubpath)
 				if err := installer.Install(s.Path, target); err != nil {
 					return fmt.Errorf("install %s: %w", s.Name, err)
 				}
@@ -315,6 +315,7 @@ func (a *App) cmdUninstall() *cobra.Command {
 				m := map[string]installer.Status{}
 				for _, s := range installed {
 					m[s.Name] = s
+					m[s.RelPath] = s
 				}
 				for _, n := range skillFlags {
 					s, ok := m[n]
@@ -326,7 +327,7 @@ func (a *App) cmdUninstall() *cobra.Command {
 			} else {
 				names := make([]string, len(installed))
 				for i, s := range installed {
-					names[i] = s.Name
+					names[i] = s.RelPath
 				}
 				idxs, err := a.Prompter.MultiSelect("Select skills to uninstall:", names)
 				if err != nil {
@@ -338,9 +339,9 @@ func (a *App) cmdUninstall() *cobra.Command {
 			}
 			for _, s := range chosen {
 				if err := installer.Remove(s.Target); err != nil {
-					return fmt.Errorf("uninstall %s: %w", s.Name, err)
+					return fmt.Errorf("uninstall %s: %w", s.RelPath, err)
 				}
-				fmt.Fprintf(a.Out, "removed %s\n", s.Name)
+				fmt.Fprintf(a.Out, "removed %s\n", s.RelPath)
 			}
 			return nil
 		},
@@ -433,7 +434,7 @@ func (a *App) cmdStatus() *cobra.Command {
 					if s.IsDangling {
 						state = "DANGLING"
 					}
-					fmt.Fprintf(a.Out, "  %-20s -> %s  [%s]\n", s.Name, s.LinkDest, state)
+					fmt.Fprintf(a.Out, "  %s -> %s  [%s]\n", s.RelPath, s.LinkDest, state)
 				}
 			}
 			if !any {
@@ -463,8 +464,8 @@ func (a *App) cmdUpdate() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(a.Out, "Pulling %s ...\n", lib.Primary.Dir)
-			for _, imp := range lib.Imports {
-				fmt.Fprintf(a.Out, "Pulling %s (%s) ...\n", imp.Name, imp.Repo.Dir)
+			for _, s := range lib.Sources {
+				fmt.Fprintf(a.Out, "Pulling %s (%s) ...\n", s.URL.DisplayPath(), s.Repo.Dir)
 			}
 			if err := lib.PullAll(cmd.Context()); err != nil {
 				return err

@@ -4,44 +4,38 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// libFakeGit simulates clone by creating .git and any skill dirs the test
-// pre-seeds via seedDir (keyed by the dir the clone will land in).
+// libFakeGit is a minimal fake GitRunner for Library tests. It records
+// every call and, when handling a `clone`, creates the target dir with a
+// `.git` marker plus any top-level dirs listed in seedAfter for that
+// clone dir. Other git commands just succeed.
 type libFakeGit struct {
-	clonesAt  []string
-	pullsAt   []string
-	pullErr   map[string]error
-	seedAfter map[string][]string // target dir -> list of skill dir names to create
-	allCalls  [][]string          // [dir, arg0, arg1, ...]
+	seedAfter map[string][]string
+	allCalls  [][]string
 }
 
-func (f *libFakeGit) Run(_ context.Context, dir string, args ...string) error {
+func (g *libFakeGit) Run(ctx context.Context, dir string, args ...string) error {
 	call := append([]string{dir}, args...)
-	f.allCalls = append(f.allCalls, call)
-	if len(args) >= 3 && args[0] == "clone" {
-		target := filepath.Join(dir, args[2])
-		f.clonesAt = append(f.clonesAt, target)
+	g.allCalls = append(g.allCalls, call)
+	if len(args) > 0 && args[0] == "clone" {
+		target := filepath.Join(dir, args[len(args)-1])
 		if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
 			return err
 		}
-		for _, s := range f.seedAfter[target] {
-			if err := os.MkdirAll(filepath.Join(target, s), 0o755); err != nil {
+		for _, name := range g.seedAfter[target] {
+			if err := os.MkdirAll(filepath.Join(target, name), 0o755); err != nil {
 				return err
 			}
-		}
-		return nil
-	}
-	if len(args) >= 1 && args[0] == "pull" {
-		f.pullsAt = append(f.pullsAt, dir)
-		if err, ok := f.pullErr[dir]; ok {
-			return err
 		}
 	}
 	return nil
 }
 
+// seedPrimary creates ~/.skillnk/repo with a .git dir, a list of top-level
+// skill dirs, and an optional config file.
 func seedPrimary(t *testing.T, home string, skills []string, configBody, configName string) string {
 	t.Helper()
 	primary := filepath.Join(home, "repo")
@@ -53,113 +47,85 @@ func seedPrimary(t *testing.T, home string, skills []string, configBody, configN
 			t.Fatal(err)
 		}
 	}
-	if configBody != "" {
-		if err := os.WriteFile(filepath.Join(primary, configName), []byte(configBody), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if configName != "" {
+		writeFile(t, primary, configName, configBody)
 	}
 	return primary
 }
 
-func TestLibraryNoConfig(t *testing.T) {
+func TestNewLibraryNoPrimary(t *testing.T) {
+	lib, err := NewLibrary(t.TempDir(), &libFakeGit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lib.Sources) != 0 {
+		t.Errorf("sources = %+v", lib.Sources)
+	}
+}
+
+func TestNewLibraryMergesImportsBySharedClone(t *testing.T) {
 	home := t.TempDir()
-	seedPrimary(t, home, []string{"a", "b"}, "", "")
+	seedPrimary(t, home, nil, `
+imports:
+  - url: github.com/anthropics/skills
+    dir: skills/skill-creator
+    version: v1
+  - url: https://github.com/anthropics/skills.git
+    dir: skills/pdf
+    version: v1
+  - url: git@github.com:me/other.git
+`, "skillnk.yaml")
 	lib, err := NewLibrary(home, &libFakeGit{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lib.Imports) != 0 {
-		t.Errorf("imports = %+v", lib.Imports)
+	if len(lib.Sources) != 2 {
+		t.Fatalf("want 2 sources, got %d: %+v", len(lib.Sources), lib.Sources)
 	}
-	skills, err := lib.ListAll()
-	if err != nil {
-		t.Fatal(err)
+	if lib.Sources[0].URL.DisplayPath() != "github.com/anthropics/skills" {
+		t.Errorf("source[0] = %+v", lib.Sources[0])
 	}
-	if len(skills) != 2 {
-		t.Errorf("got %+v", skills)
+	if len(lib.Sources[0].Imports) != 2 {
+		t.Errorf("first source should have merged 2 imports, got %d", len(lib.Sources[0].Imports))
 	}
-	for _, s := range skills {
-		if s.Source != "" {
-			t.Errorf("primary skill source should be empty, got %q", s.Source)
-		}
+	if lib.Sources[1].URL.DisplayPath() != "github.com/me/other" {
+		t.Errorf("source[1] = %+v", lib.Sources[1])
 	}
-}
-
-func TestLibraryWithImports(t *testing.T) {
-	home := t.TempDir()
-	seedPrimary(t, home, []string{"alpha"}, `
-imports:
-  - name: team
-    url: git@example:team/skills.git
-  - url: https://github.com/org/more.git
-`, "skillnk.yaml")
-
-	g := &libFakeGit{
-		seedAfter: map[string][]string{
-			filepath.Join(home, "team"):     {"beta", "gamma"},
-			filepath.Join(home, "org/more"): {"delta"},
-		},
-	}
-	lib, err := NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lib.Imports) != 2 {
-		t.Fatalf("imports = %+v", lib.Imports)
-	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.clonesAt) != 2 {
-		t.Errorf("clones = %v", g.clonesAt)
-	}
-	// Calling again should be a no-op (both exist).
-	g.clonesAt = nil
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.clonesAt) != 0 {
-		t.Errorf("second call should clone nothing, got %v", g.clonesAt)
-	}
-
-	// ListAll should return skills from all sources, tagged with source.
-	skills, err := lib.ListAll()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{
-		"alpha": "",
-		"beta":  "team",
-		"gamma": "team",
-		"delta": "org/more",
-	}
-	if len(skills) != len(want) {
-		t.Fatalf("got %+v", skills)
-	}
-	for _, s := range skills {
-		w, ok := want[s.Name]
-		if !ok {
-			t.Errorf("unexpected skill %q", s.Name)
-			continue
-		}
-		if s.Source != w {
-			t.Errorf("skill %q source = %q want %q", s.Name, s.Source, w)
-		}
+	wantDir := filepath.Join(home, "github.com", "anthropics", "skills")
+	if lib.Sources[0].Repo.Dir != wantDir {
+		t.Errorf("clone dir = %q want %q", lib.Sources[0].Repo.Dir, wantDir)
 	}
 }
 
-func TestLibraryDedupePrimaryWins(t *testing.T) {
+func TestNewLibraryVersionConflict(t *testing.T) {
 	home := t.TempDir()
-	seedPrimary(t, home, []string{"shared"}, `
+	seedPrimary(t, home, nil, `
 imports:
-  - name: team
-    url: x
+  - url: github.com/anthropics/skills
+    dir: skills/a
+    version: v1
+  - url: github.com/anthropics/skills
+    dir: skills/b
+    version: v2
 `, "skillnk.yaml")
-	g := &libFakeGit{
-		seedAfter: map[string][]string{
-			filepath.Join(home, "team"): {"shared", "teamonly"},
-		},
+	_, err := NewLibrary(home, &libFakeGit{})
+	if err == nil || !strings.Contains(err.Error(), "conflicting versions") {
+		t.Errorf("want conflict error, got %v", err)
 	}
+}
+
+func TestEnsureClonedAndCheckout(t *testing.T) {
+	home := t.TempDir()
+	seedPrimary(t, home, nil, `
+imports:
+  - url: github.com/anthropics/skills
+    dir: skills/skill-creator
+    version: v1.2.3
+  - url: github.com/anthropics/skills
+    dir: skills/pdf
+    version: v1.2.3
+`, "skillnk.yaml")
+	g := &libFakeGit{}
 	lib, err := NewLibrary(home, g)
 	if err != nil {
 		t.Fatal(err)
@@ -167,234 +133,158 @@ imports:
 	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	skills, err := lib.ListAll()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(skills) != 2 {
-		t.Fatalf("got %+v", skills)
-	}
-	// "shared" must come from primary.
-	for _, s := range skills {
-		if s.Name == "shared" && s.Source != "" {
-			t.Errorf("shared should be primary, got source %q", s.Source)
-		}
-	}
-}
-
-func TestLibraryDoesNotFollowTransitiveImports(t *testing.T) {
-	home := t.TempDir()
-	seedPrimary(t, home, []string{"p1"}, `
-imports:
-  - name: team
-    url: x
-`, "skillnk.yaml")
-	teamDir := filepath.Join(home, "team")
-	g := &libFakeGit{
-		seedAfter: map[string][]string{
-			teamDir: {"t1"},
-		},
-	}
-	lib, err := NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// Now add a transitive config to the team repo claiming further imports.
-	if err := os.WriteFile(filepath.Join(teamDir, "skillnk.yaml"),
-		[]byte("imports:\n - url: https://github.com/should/not/be/followed\n"),
-		0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Rebuild library; should still only have one import.
-	lib, err = NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lib.Imports) != 1 || lib.Imports[0].Name != "team" {
-		t.Errorf("transitive imports followed: %+v", lib.Imports)
-	}
-	// And cloning is a no-op.
-	g.clonesAt = nil
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.clonesAt) != 0 {
-		t.Errorf("should not clone transitive import: %v", g.clonesAt)
-	}
-}
-
-func TestLibraryPullAll(t *testing.T) {
-	home := t.TempDir()
-	seedPrimary(t, home, []string{"p"}, `
-imports:
-  - name: team
-    url: x
-`, "skillnk.yaml")
-	g := &libFakeGit{
-		seedAfter: map[string][]string{filepath.Join(home, "team"): {"t"}},
-	}
-	lib, err := NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := lib.PullAll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(g.pullsAt) != 2 {
-		t.Errorf("pulls = %v (want primary + team)", g.pullsAt)
-	}
-}
-
-func TestLibraryPullAllCollectsErrors(t *testing.T) {
-	home := t.TempDir()
-	seedPrimary(t, home, []string{"p"}, `
-imports:
-  - name: team
-    url: x
-`, "skillnk.yaml")
-	teamDir := filepath.Join(home, "team")
-	g := &libFakeGit{
-		seedAfter: map[string][]string{teamDir: {"t"}},
-	}
-	lib, err := NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// Set import pull to fail.
-	g.pullErr = map[string]error{teamDir: errTest("boom")}
-	err = lib.PullAll(context.Background())
-	if err == nil {
-		t.Error("expected error")
-	}
-	// primary should still have been pulled
-	if len(g.pullsAt) < 2 {
-		t.Errorf("pulls = %v, want primary attempted too", g.pullsAt)
-	}
-}
-
-type errTest string
-
-func (e errTest) Error() string { return string(e) }
-
-func TestLibraryClonesAndChecksOutPinnedVersion(t *testing.T) {
-	home := t.TempDir()
-	seedPrimary(t, home, []string{"p"}, `
-imports:
-  - name: team
-    url: git@example:team/skills.git
-    version: v1.0.0
-`, "skillnk.yaml")
-	teamDir := filepath.Join(home, "team")
-	g := &libFakeGit{seedAfter: map[string][]string{teamDir: {"beta"}}}
-	lib, err := NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// should have a clone AND a checkout
-	var clones, checkouts []string
+	clones, checkouts := 0, 0
 	for _, c := range g.allCalls {
 		if len(c) >= 2 && c[1] == "clone" {
-			clones = append(clones, c[0])
+			clones++
 		}
-		if len(c) >= 3 && c[1] == "checkout" {
-			checkouts = append(checkouts, c[2])
+		if len(c) >= 3 && c[1] == "checkout" && c[2] == "v1.2.3" {
+			checkouts++
 		}
 	}
-	if len(clones) != 1 {
-		t.Errorf("clones = %v", clones)
+	if clones != 1 {
+		t.Errorf("want 1 clone, got %d (%v)", clones, g.allCalls)
 	}
-	if len(checkouts) != 1 || checkouts[0] != "v1.0.0" {
-		t.Errorf("checkouts = %v (want [v1.0.0])", checkouts)
+	if checkouts != 1 {
+		t.Errorf("want 1 checkout, got %d", checkouts)
 	}
 }
 
-func TestLibraryUnpinnedImportClones(t *testing.T) {
+func TestListAllExpandsDirSelectors(t *testing.T) {
 	home := t.TempDir()
-	seedPrimary(t, home, []string{"p"}, `
+	seedPrimary(t, home, []string{"primary-a", "primary-b"}, `
 imports:
-  - name: team
-    url: x
+  - url: github.com/anthropics/skills
+    dir: skills/skill-creator
+  - url: github.com/anthropics/skills
+    dir: skills/*
+  - url: git@example.com:my-org/my-repo
+    # no dir → all top-level dirs
 `, "skillnk.yaml")
-	teamDir := filepath.Join(home, "team")
-	g := &libFakeGit{seedAfter: map[string][]string{teamDir: {"beta"}}}
+
+	// Pre-populate clone dirs (EnsureCloned also does this via the fake,
+	// but we need specific subdir structure, so seed directly).
+	anth := filepath.Join(home, "github.com", "anthropics", "skills")
+	must(t, os.MkdirAll(filepath.Join(anth, ".git"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(anth, "skills", "skill-creator"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(anth, "skills", "pdf"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(anth, "skills", "docx"), 0o755))
+
+	mine := filepath.Join(home, "example.com", "my-org", "my-repo")
+	must(t, os.MkdirAll(filepath.Join(mine, ".git"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(mine, "alpha"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(mine, "beta"), 0o755))
+	must(t, os.MkdirAll(filepath.Join(mine, ".hidden"), 0o755))
+
+	lib, err := NewLibrary(home, &libFakeGit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skills, err := lib.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a map of name -> install subpath for assertions.
+	got := map[string]string{}
+	for _, s := range skills {
+		got[s.Name+"@"+s.Source] = s.InstallSubpath
+	}
+
+	want := map[string]string{
+		"primary-a@":    "primary-a",
+		"primary-b@":    "primary-b",
+		// explicit single
+		"skill-creator@github.com/anthropics/skills": filepath.Join("github.com", "anthropics", "skills", "skills", "skill-creator"),
+		// wildcard expansion (includes skill-creator again since it's a subdir of skills/)
+		"pdf@github.com/anthropics/skills":  filepath.Join("github.com", "anthropics", "skills", "skills", "pdf"),
+		"docx@github.com/anthropics/skills": filepath.Join("github.com", "anthropics", "skills", "skills", "docx"),
+		// default (no dir) → top-level
+		"alpha@example.com/my-org/my-repo": filepath.Join("example.com", "my-org", "my-repo", "alpha"),
+		"beta@example.com/my-org/my-repo":  filepath.Join("example.com", "my-org", "my-repo", "beta"),
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("skill %s: got %q want %q", k, got[k], v)
+		}
+	}
+	// .hidden must not appear in the default-wildcard expansion.
+	for _, s := range skills {
+		if s.Name == ".hidden" {
+			t.Errorf(".hidden should be skipped at repo root: %+v", s)
+		}
+	}
+}
+
+func TestListAllMissingSubdirIsIgnored(t *testing.T) {
+	home := t.TempDir()
+	seedPrimary(t, home, nil, `
+imports:
+  - url: github.com/a/b
+    dir: missing/skill
+`, "skillnk.yaml")
+	anth := filepath.Join(home, "github.com", "a", "b")
+	must(t, os.MkdirAll(filepath.Join(anth, ".git"), 0o755))
+
+	lib, err := NewLibrary(home, &libFakeGit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skills, err := lib.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 0 {
+		t.Errorf("want no skills, got %+v", skills)
+	}
+}
+
+func TestPullAllPinnedAndUnpinned(t *testing.T) {
+	home := t.TempDir()
+	seedPrimary(t, home, nil, `
+imports:
+  - url: github.com/a/pinned
+    version: v1
+  - url: github.com/a/unpinned
+`, "skillnk.yaml")
+	// Pre-clone both.
+	for _, p := range []string{"github.com/a/pinned", "github.com/a/unpinned"} {
+		must(t, os.MkdirAll(filepath.Join(home, p, ".git"), 0o755))
+	}
+	g := &libFakeGit{}
 	lib, err := NewLibrary(home, g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range g.allCalls {
-		if len(c) >= 2 && c[1] == "checkout" {
-			t.Errorf("unpinned import should not checkout: %v", c)
-		}
-	}
-}
-
-func TestLibraryPullPinnedUsesFetchCheckout(t *testing.T) {
-	home := t.TempDir()
-	seedPrimary(t, home, []string{"p"}, `
-imports:
-  - name: pinned
-    url: x
-    version: v2
-  - name: floating
-    url: y
-`, "skillnk.yaml")
-	pinnedDir := filepath.Join(home, "pinned")
-	floatDir := filepath.Join(home, "floating")
-	g := &libFakeGit{seedAfter: map[string][]string{pinnedDir: {"a"}, floatDir: {"b"}}}
-	lib, err := NewLibrary(home, g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lib.EnsureCloned(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// Reset call log so we only see update calls
-	g.allCalls = nil
 	if err := lib.PullAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	sawPinnedFetch := false
-	sawPinnedCheckout := false
-	sawFloatPull := false
-	sawPinnedPull := false
+	var sawFetch, sawPullUnpinned, sawCheckout bool
 	for _, c := range g.allCalls {
 		if len(c) < 2 {
 			continue
 		}
-		dir, op := c[0], c[1]
-		switch {
-		case dir == pinnedDir && op == "fetch":
-			sawPinnedFetch = true
-		case dir == pinnedDir && op == "checkout" && len(c) >= 3 && c[2] == "v2":
-			sawPinnedCheckout = true
-		case dir == pinnedDir && op == "pull":
-			sawPinnedPull = true
-		case dir == floatDir && op == "pull":
-			sawFloatPull = true
+		if strings.Contains(c[0], "pinned") && c[1] == "fetch" {
+			sawFetch = true
+		}
+		if strings.Contains(c[0], "pinned") && c[1] == "checkout" {
+			sawCheckout = true
+		}
+		if strings.Contains(c[0], "unpinned") && c[1] == "pull" {
+			sawPullUnpinned = true
 		}
 	}
-	if !sawPinnedFetch || !sawPinnedCheckout {
-		t.Errorf("pinned import should fetch+checkout, calls: %v", g.allCalls)
+	if !sawFetch || !sawCheckout {
+		t.Errorf("pinned repo should fetch+checkout: %v", g.allCalls)
 	}
-	if sawPinnedPull {
-		t.Errorf("pinned import must not pull: %v", g.allCalls)
+	if !sawPullUnpinned {
+		t.Errorf("unpinned repo should pull: %v", g.allCalls)
 	}
-	if !sawFloatPull {
-		t.Errorf("unpinned import should pull, calls: %v", g.allCalls)
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }

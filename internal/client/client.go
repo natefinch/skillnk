@@ -21,10 +21,11 @@ type Client struct {
 	SkillsSubdir string
 }
 
-// TargetFor returns the absolute directory where a skill of the given name
-// should be symlinked, given a project root.
-func (c Client) TargetFor(projectRoot, skillName string) string {
-	return filepath.Join(projectRoot, c.SkillsSubdir, skillName)
+// TargetFor returns the absolute directory where a skill should be
+// symlinked, given a project root and a skill-specific install subpath
+// (which may itself contain directory segments for URL-namespaced imports).
+func (c Client) TargetFor(projectRoot, installSubpath string) string {
+	return filepath.Join(projectRoot, c.SkillsSubdir, installSubpath)
 }
 
 // Registry is the built-in list of supported clients. Order is the preferred

@@ -101,9 +101,10 @@ func (r Repo) Checkout(ctx context.Context, ref string) error {
 
 // Skill describes one installable skill in the repo.
 type Skill struct {
-	Name   string // directory name
-	Path   string // absolute path to the skill directory
-	Source string // "" for the primary repo, import name otherwise
+	Name           string // directory basename (and frontmatter name)
+	Path           string // absolute path to the skill directory on disk
+	Source         string // "" for the primary repo, "host/path" otherwise
+	InstallSubpath string // relative target path under a client's skills dir
 }
 
 // reservedTopLevel are directory names we never treat as skills even if the
