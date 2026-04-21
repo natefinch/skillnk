@@ -107,7 +107,7 @@ imports:
 	if len(lib.Imports) != 2 {
 		t.Fatalf("imports = %+v", lib.Imports)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(g.clonesAt) != 2 {
@@ -115,7 +115,7 @@ imports:
 	}
 	// Calling again should be a no-op (both exist).
 	g.clonesAt = nil
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(g.clonesAt) != 0 {
@@ -164,7 +164,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	skills, err := lib.ListAll()
@@ -199,7 +199,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// Now add a transitive config to the team repo claiming further imports.
@@ -218,7 +218,7 @@ imports:
 	}
 	// And cloning is a no-op.
 	g.clonesAt = nil
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(g.clonesAt) != 0 {
@@ -240,7 +240,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := lib.PullAll(context.Background()); err != nil {
@@ -266,7 +266,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// Set import pull to fail.
@@ -299,7 +299,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// should have a clone AND a checkout
@@ -333,7 +333,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range g.allCalls {
@@ -360,7 +360,7 @@ imports:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lib.EnsureImportsCloned(context.Background(), home); err != nil {
+	if err := lib.EnsureCloned(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// Reset call log so we only see update calls

@@ -25,8 +25,19 @@ type Import struct {
 	Version string `yaml:"version" json:"version" toml:"version"`
 }
 
+// SkillRef references one individual skill inside a git repo, typically at
+// a subdirectory of that repo. Only github.com URLs are currently
+// supported. Path segments after "<owner>/<repo>" are treated as the
+// subpath of the skill inside the repo.
+type SkillRef struct {
+	URL     string `yaml:"url"     json:"url"     toml:"url"`
+	Name    string `yaml:"name"    json:"name"    toml:"name"`
+	Version string `yaml:"version" json:"version" toml:"version"`
+}
+
 type repoConfigFile struct {
-	Imports []Import `yaml:"imports" json:"imports" toml:"imports"`
+	Imports []Import   `yaml:"imports" json:"imports" toml:"imports"`
+	Skills  []SkillRef `yaml:"skills"  json:"skills"  toml:"skills"`
 }
 
 // configFileNames is the ordered list of accepted skillnk config filenames in
@@ -45,14 +56,10 @@ var reservedImportNames = map[string]struct{}{
 	"config.yaml": {},
 }
 
-// ReadImports reads the skillnk config from the root of repoDir and returns
-// the normalized import list. If no config file is present, it returns (nil,
-// nil). Imports with a missing Name are defaulted from their URL.
-func ReadImports(repoDir string) ([]Import, error) {
-	var (
-		cfg   repoConfigFile
-		found string
-	)
+// readConfigRaw loads the first matching config file and decodes it into
+// repoConfigFile. Returns ("", nil) if no file is present.
+func readConfigRaw(repoDir string) (repoConfigFile, string, error) {
+	var cfg repoConfigFile
 	for _, name := range configFileNames {
 		p := filepath.Join(repoDir, name)
 		b, err := os.ReadFile(p)
@@ -60,29 +67,38 @@ func ReadImports(repoDir string) ([]Import, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, fmt.Errorf("skillrepo: read %s: %w", p, err)
+			return cfg, "", fmt.Errorf("skillrepo: read %s: %w", p, err)
 		}
 		switch filepath.Ext(name) {
 		case ".yaml", ".yml":
 			if err := yaml.Unmarshal(b, &cfg); err != nil {
-				return nil, fmt.Errorf("skillrepo: parse %s: %w", p, err)
+				return cfg, p, fmt.Errorf("skillrepo: parse %s: %w", p, err)
 			}
 		case ".json":
 			if err := json.Unmarshal(b, &cfg); err != nil {
-				return nil, fmt.Errorf("skillrepo: parse %s: %w", p, err)
+				return cfg, p, fmt.Errorf("skillrepo: parse %s: %w", p, err)
 			}
 		case ".toml":
 			if err := toml.Unmarshal(b, &cfg); err != nil {
-				return nil, fmt.Errorf("skillrepo: parse %s: %w", p, err)
+				return cfg, p, fmt.Errorf("skillrepo: parse %s: %w", p, err)
 			}
 		}
-		found = p
-		break
+		return cfg, p, nil
+	}
+	return cfg, "", nil
+}
+
+// ReadImports reads the skillnk config from the root of repoDir and returns
+// the normalized import list. If no config file is present, it returns (nil,
+// nil). Imports with a missing Name are defaulted from their URL.
+func ReadImports(repoDir string) ([]Import, error) {
+	cfg, found, err := readConfigRaw(repoDir)
+	if err != nil {
+		return nil, err
 	}
 	if found == "" {
 		return nil, nil
 	}
-
 	seen := map[string]struct{}{}
 	out := make([]Import, 0, len(cfg.Imports))
 	for i, imp := range cfg.Imports {
@@ -102,6 +118,134 @@ func ReadImports(repoDir string) ([]Import, error) {
 		out = append(out, imp)
 	}
 	return out, nil
+}
+
+// ReadSkillRefs reads the skillnk config and returns the normalized list of
+// individual skill references. Each entry's URL is required and must be a
+// supported github.com URL. Returns (nil, nil) if no config file exists.
+func ReadSkillRefs(repoDir string) ([]SkillRef, error) {
+	cfg, found, err := readConfigRaw(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	if found == "" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]SkillRef, 0, len(cfg.Skills))
+	for i, sr := range cfg.Skills {
+		if strings.TrimSpace(sr.URL) == "" {
+			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: url is required", found, i)
+		}
+		g, ok := ParseGitHubURL(sr.URL)
+		if !ok {
+			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: unsupported URL %q (only github.com URLs are supported)", found, i, sr.URL)
+		}
+		if sr.Name == "" {
+			sr.Name = g.DefaultSkillName()
+		}
+		if err := validateImportName(sr.Name); err != nil {
+			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: %w", found, i, err)
+		}
+		if _, dup := seen[sr.Name]; dup {
+			return nil, fmt.Errorf("skillrepo: %s: skills[%d]: duplicate name %q", found, i, sr.Name)
+		}
+		seen[sr.Name] = struct{}{}
+		out = append(out, sr)
+	}
+	return out, nil
+}
+
+// GitHubURL is a parsed GitHub-style URL, split into its repo coordinates
+// and any subpath after <owner>/<repo>.
+type GitHubURL struct {
+	Owner   string
+	Repo    string // without trailing ".git"
+	Subpath string // "" if the URL refers to the repo root
+}
+
+// ParseGitHubURL parses a github-style URL into its components. It accepts
+// the common forms:
+//
+//	github.com/OWNER/REPO[/SUB/PATH]
+//	github.com:OWNER/REPO[/SUB/PATH]
+//	https://github.com/OWNER/REPO[/SUB/PATH]
+//	http://github.com/OWNER/REPO[/SUB/PATH]
+//	ssh://git@github.com/OWNER/REPO[/SUB/PATH]
+//	git@github.com:OWNER/REPO[/SUB/PATH]
+//
+// A trailing ".git" on REPO is tolerated and stripped. Returns (_, false)
+// if the input is not a recognizable github.com URL.
+func ParseGitHubURL(raw string) (GitHubURL, bool) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimSuffix(s, "/")
+	prefixes := []string{
+		"https://github.com/",
+		"http://github.com/",
+		"ssh://git@github.com/",
+		"git@github.com:",
+		"github.com/",
+		"github.com:",
+	}
+	matched := false
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			s = strings.TrimPrefix(s, p)
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return GitHubURL{}, false
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) < 2 {
+		return GitHubURL{}, false
+	}
+	owner := parts[0]
+	repo := strings.TrimSuffix(parts[1], ".git")
+	if owner == "" || repo == "" {
+		return GitHubURL{}, false
+	}
+	var sub string
+	if len(parts) > 2 {
+		rest := strings.Join(parts[2:], "/")
+		sub = path.Clean(rest)
+		// Reject anything that would escape the repo root.
+		if sub == "." || sub == "/" || strings.HasPrefix(sub, "../") || sub == ".." {
+			sub = ""
+		}
+	}
+	return GitHubURL{Owner: owner, Repo: repo, Subpath: sub}, true
+}
+
+// CloneURL returns a canonical https clone URL (always ending in .git) for
+// the repo.
+func (g GitHubURL) CloneURL() string {
+	return "https://github.com/" + g.Owner + "/" + g.Repo + ".git"
+}
+
+// RepoName returns "owner/repo" — the canonical two-segment repo path.
+func (g GitHubURL) RepoName() string {
+	return g.Owner + "/" + g.Repo
+}
+
+// DisplayPath returns the URL's canonical short form, including any
+// subpath: e.g. "anthropics/skills/skills/skill-creator".
+func (g GitHubURL) DisplayPath() string {
+	if g.Subpath == "" {
+		return g.RepoName()
+	}
+	return g.RepoName() + "/" + g.Subpath
+}
+
+// DefaultSkillName returns the default skill name for this URL: the last
+// segment of the subpath, or the repo name if no subpath is present.
+func (g GitHubURL) DefaultSkillName() string {
+	if g.Subpath != "" {
+		return path.Base(g.Subpath)
+	}
+	return g.Repo
 }
 
 // DefaultImportName derives an import name from a git URL. It strips common

@@ -212,7 +212,7 @@ func (a *App) cmdInstall() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := lib.EnsureImportsCloned(cmd.Context(), layout.SkillnkHome); err != nil {
+			if err := lib.EnsureCloned(cmd.Context()); err != nil {
 				return err
 			}
 			skills, err := lib.ListAll()
@@ -363,7 +363,7 @@ func (a *App) cmdList() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := lib.EnsureImportsCloned(cmd.Context(), layout.SkillnkHome); err != nil {
+			if err := lib.EnsureCloned(cmd.Context()); err != nil {
 				return err
 			}
 			skills, err := lib.ListAll()
@@ -459,7 +459,7 @@ func (a *App) cmdUpdate() *cobra.Command {
 			}
 			// Pick up any imports the user has added since the last update,
 			// and any new imports introduced by pulling the primary repo.
-			if err := lib.EnsureImportsCloned(cmd.Context(), layout.SkillnkHome); err != nil {
+			if err := lib.EnsureCloned(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.Out, "Pulling %s ...\n", lib.Primary.Dir)
@@ -475,7 +475,7 @@ func (a *App) cmdUpdate() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return lib.EnsureImportsCloned(cmd.Context(), layout.SkillnkHome)
+			return lib.EnsureCloned(cmd.Context())
 		},
 	}
 }

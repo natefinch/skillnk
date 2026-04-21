@@ -28,8 +28,12 @@ are ignored).
 ## The `skillnk` config file
 
 Your skills repo may include a `skillnk` config file at its root, which
-currently configures one thing: **imports** — other git repos whose skills
-should be added to your library.
+configures additional skill sources:
+
+- **`imports`** — other git repos whose top-level directories are treated
+  as additional skills in your library.
+- **`skills`** — individual skills pinned by URL, optionally pointing at a
+  subdirectory inside a larger repo.
 
 ### Location and format
 
@@ -41,9 +45,9 @@ four formats. If multiple exist, this precedence applies (first match wins):
 3. `skillnk.json`
 4. `skillnk.toml`
 
-### Schema
+### Schema: `imports`
 
-One top-level key: `imports`, a list of objects.
+A list of objects, each describing a whole skills repo to include.
 
 | field     | required | notes                                                             |
 |-----------|----------|-------------------------------------------------------------------|
@@ -65,6 +69,31 @@ advanced via `git pull --ff-only` on update.
 Names must not contain `..`, start with `.` or `/`, or equal the reserved
 values `repo` or `config.yaml`. Duplicate names are rejected.
 
+### Schema: `skills`
+
+A list of individual skills, each identified by a GitHub URL that may point
+into a subdirectory of the repo.
+
+| field     | required | notes                                                                   |
+|-----------|----------|-------------------------------------------------------------------------|
+| `url`     | yes      | A GitHub URL. Path segments after `owner/repo` name a subdirectory.     |
+| `name`    | no       | Skill name. Defaults to the last segment of the subpath (or repo name). |
+| `version` | no       | Pin to a specific git ref — tag, branch, or commit SHA.                 |
+
+The URL must point at `github.com`. All of these forms are accepted:
+
+- `github.com/anthropics/skills/skills/skill-creator`
+- `https://github.com/anthropics/skills/skills/skill-creator`
+- `git@github.com:anthropics/skills/skills/skill-creator`
+- `ssh://git@github.com/anthropics/skills.git/skills/skill-creator`
+
+For `github.com/anthropics/skills/skills/skill-creator`, skillnk clones
+`https://github.com/anthropics/skills.git` into `~/.skillnk/anthropics/skills`
+and installs the `skills/skill-creator` subdirectory. If multiple `skills:`
+entries (or an `imports:` entry) point at the same underlying repo, the
+clone is shared. Conflicting `version` pins on the same underlying repo are
+rejected.
+
 ### Examples
 
 ```yaml
@@ -74,6 +103,11 @@ imports:
     url: git@github.com:acme/team-skills.git
     version: v1.4.0                                   # pinned to a tag
   - url: https://github.com/charmbracelet/skills.git  # tracks default branch
+
+skills:
+  - url: github.com/anthropics/skills/skills/skill-creator
+    version: v0.3.0
+  - url: github.com/anthropics/skills/skills/pdf
 ```
 
 ```json
@@ -81,6 +115,10 @@ imports:
   "imports": [
     { "name": "team-skills", "url": "git@github.com:acme/team-skills.git", "version": "v1.4.0" },
     { "url": "https://github.com/charmbracelet/skills.git" }
+  ],
+  "skills": [
+    { "url": "github.com/anthropics/skills/skills/skill-creator", "version": "v0.3.0" },
+    { "url": "github.com/anthropics/skills/skills/pdf" }
   ]
 }
 ```
@@ -94,23 +132,33 @@ version = "v1.4.0"
 
 [[imports]]
 url = "https://github.com/charmbracelet/skills.git"
+
+[[skills]]
+url     = "github.com/anthropics/skills/skills/skill-creator"
+version = "v0.3.0"
+
+[[skills]]
+url = "github.com/anthropics/skills/skills/pdf"
 ```
 
 ### Behavior
 
 - Imports are cloned into `~/.skillnk/<name>` on first use (during `install`,
-  `list`, or `update`). Pinned imports are checked out to `version` right
-  after cloning.
-- Their top-level directories appear alongside your own skills in `list` and
-  the `install` picker, tagged with the source repo name.
+  `list`, or `update`). Skill references are cloned into
+  `~/.skillnk/<owner>/<repo>` and shared across any other refs (or imports)
+  that point at the same repo. Pinned sources are checked out to `version`
+  right after cloning.
+- Their skills appear alongside your own in `list` and the `install`
+  picker, tagged with the source — the import name for imports, or
+  `owner/repo[/subpath]` for skill references.
 - `skillnk update` runs `git pull --ff-only` on the primary checkout and on
-  every unpinned import. For pinned imports, it runs `git fetch --tags`
-  followed by `git checkout <version>` so the import stays at the pinned
-  ref.
+  every unpinned source. For pinned sources, it runs `git fetch --tags`
+  followed by `git checkout <version>` so they stay at the pinned ref.
 - Imports are **not transitive**: a `skillnk` config inside an imported repo
   is ignored.
 - If the same skill name appears in more than one source, the primary repo
-  wins, then imports in declaration order.
+  wins, then imports in declaration order, then skill references in
+  declaration order.
 
 ## Commands
 
